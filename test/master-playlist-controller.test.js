@@ -367,7 +367,10 @@ QUnit.test('resyncs SegmentLoader for a smooth quality change', function(assert)
   };
 
   this.masterPlaylistController.selectPlaylist = () => {
-    return this.masterPlaylistController.master().playlists[0];
+    const playlists = this.masterPlaylistController.master().playlists;
+    const currenstPlaylist = this.masterPlaylistController.media();
+
+    return playlists.find((playlist) => playlist !== currenstPlaylist);
   };
 
   this.masterPlaylistController.smoothQualityChange_();
@@ -545,7 +548,10 @@ QUnit.test('resets everything for a fast quality change', function(assert) {
 
   // media is changed
   this.masterPlaylistController.selectPlaylist = () => {
-    return this.masterPlaylistController.master().playlists[0];
+    const playlists = this.masterPlaylistController.master().playlists;
+    const currenstPlaylist = this.masterPlaylistController.media();
+
+    return playlists.find((playlist) => playlist !== currenstPlaylist);
   };
 
   this.masterPlaylistController.fastQualityChange_();
@@ -575,7 +581,10 @@ QUnit.test('seeks in place for fast quality switch on non-IE/Edge browsers', fun
   }).then(() => {
     // media is changed
     this.masterPlaylistController.selectPlaylist = () => {
-      return this.masterPlaylistController.master().playlists[0];
+      const playlists = this.masterPlaylistController.master().playlists;
+      const currenstPlaylist = this.masterPlaylistController.media();
+
+      return playlists.find((playlist) => playlist !== currenstPlaylist);
     };
 
     this.player.tech_.on('seeking', function() {
@@ -627,7 +636,10 @@ QUnit.test('seeks forward 0.04 sec for fast quality switch on Edge', function(as
   }).then(() => {
     // media is changed
     this.masterPlaylistController.selectPlaylist = () => {
-      return this.masterPlaylistController.master().playlists[0];
+      const playlists = this.masterPlaylistController.master().playlists;
+      const currenstPlaylist = this.masterPlaylistController.media();
+
+      return playlists.find((playlist) => playlist !== currenstPlaylist);
     };
 
     this.player.tech_.on('seeking', function() {
@@ -681,7 +693,10 @@ QUnit.test('seeks forward 0.04 sec for fast quality switch on IE', function(asse
   }).then(() => {
     // media is changed
     this.masterPlaylistController.selectPlaylist = () => {
-      return this.masterPlaylistController.master().playlists[0];
+      const playlists = this.masterPlaylistController.master().playlists;
+      const currenstPlaylist = this.masterPlaylistController.media();
+
+      return playlists.find((playlist) => playlist !== currenstPlaylist);
     };
 
     this.player.tech_.on('seeking', function() {
