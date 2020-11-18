@@ -345,7 +345,8 @@ export default class SegmentLoader extends videojs.EventTarget {
     this.mediaSource_ = settings.mediaSource;
     this.vhs_ = settings.vhs;
     this.loaderType_ = settings.loaderType;
-    this.startingMedia_ = void 0;
+    this.currentMediaInfo_ = void 0;
+    this.startingMediaInfo_ = void 0;
     this.segmentMetadataTrack_ = settings.segmentMetadataTrack;
     this.goalBufferLength_ = settings.goalBufferLength;
     this.sourceType_ = settings.sourceType;
@@ -632,12 +633,12 @@ export default class SegmentLoader extends videojs.EventTarget {
    *         TimeRange object representing the current buffered ranges
    */
   buffered_() {
-    if (!this.sourceUpdater_ || !this.startingMedia_) {
+    if (!this.sourceUpdater_ || !this.startingMediaInfo_) {
       return videojs.createTimeRanges();
     }
 
     if (this.loaderType_ === 'main') {
-      const { hasAudio, hasVideo, isMuxed } = this.startingMedia_;
+      const { hasAudio, hasVideo, isMuxed } = this.startingMediaInfo_;
 
       if (hasVideo && hasAudio && !this.audioDisabled_ && !isMuxed) {
         return this.sourceUpdater_.buffered();
@@ -839,7 +840,7 @@ export default class SegmentLoader extends videojs.EventTarget {
         // out before we start adding more data
         this.resyncLoader();
       }
-      this.startingMedia_ = void 0;
+      this.currentMediaInfo_ = void 0;
       this.trigger('playlistupdate');
 
       // the rest of this function depends on `oldPlaylist` being defined
@@ -978,7 +979,7 @@ export default class SegmentLoader extends videojs.EventTarget {
       end = this.duration_();
     }
 
-    if (!this.sourceUpdater_ || !this.startingMedia_) {
+    if (!this.sourceUpdater_ || !this.currentMediaInfo_) {
       // nothing to remove if we haven't processed any media
       return;
     }
@@ -997,7 +998,7 @@ export default class SegmentLoader extends videojs.EventTarget {
       this.sourceUpdater_.removeAudio(start, end, removeFinished);
     }
 
-    if (this.loaderType_ === 'main' && this.startingMedia_ && this.startingMedia_.hasVideo) {
+    if (this.loaderType_ === 'main' && this.currentMediaInfo_ && this.currentMediaInfo_.hasVideo) {
       this.gopBuffer_ = removeGopBuffer(this.gopBuffer_, start, end, this.timeMapping_);
       removesRemaining++;
       this.sourceUpdater_.removeVideo(start, end, removeFinished);
@@ -1089,12 +1090,6 @@ export default class SegmentLoader extends videojs.EventTarget {
       return;
     }
 
-    if (segmentInfo.mediaIndex === this.playlist_.segments.length - 1 &&
-        this.mediaSource_.readyState === 'ended' &&
-        !this.seeking_()) {
-      return;
-    }
-
     segmentInfo.timestampOffset = timestampOffsetForSegment({
       segmentTimeline: segmentInfo.timeline,
       currentTimeline: this.currentTimeline_,
@@ -1150,9 +1145,8 @@ export default class SegmentLoader extends videojs.EventTarget {
    * @param {Object} syncPoint - a segment info object that describes the
    * @return {Object} a segment request object that describes the segment to load
    */
-  checkBuffer_(buffered, playlist, mediaIndex, hasPlayed, currentTime, syncPoint) {
+  checkBuffer_(buffered, playlist, currentMediaIndex, hasPlayed, currentTime, syncPoint) {
     let lastBufferedEnd = 0;
-    let startOfSegment;
 
     if (buffered.length) {
       lastBufferedEnd = buffered.end(buffered.length - 1);
@@ -1176,31 +1170,33 @@ export default class SegmentLoader extends videojs.EventTarget {
       return null;
     }
 
+    let nextMediaIndex = null;
+    let startOfSegment;
+    let isSyncRequest = false;
+
     // When the syncPoint is null, there is no way of determining a good
     // conservative segment index to fetch from
     // The best thing to do here is to get the kind of sync-point data by
     // making a request
     if (syncPoint === null) {
-      mediaIndex = this.getSyncSegmentCandidate_(playlist);
-      return this.generateSegmentInfo_(playlist, mediaIndex, null, true);
-    }
-
+      nextMediaIndex = this.getSyncSegmentCandidate_(playlist);
+      isSyncRequest = true;
+    } else if (currentMediaIndex !== null) {
     // Under normal playback conditions fetching is a simple walk forward
-    if (mediaIndex !== null) {
-      const segment = playlist.segments[mediaIndex];
+      const segment = playlist.segments[currentMediaIndex];
 
       if (segment && segment.end) {
         startOfSegment = segment.end;
       } else {
         startOfSegment = lastBufferedEnd;
       }
-      return this.generateSegmentInfo_(playlist, mediaIndex + 1, startOfSegment, false);
-    }
+
+      nextMediaIndex = currentMediaIndex + 1;
 
     // There is a sync-point but the lack of a mediaIndex indicates that
     // we need to make a good conservative guess about which segment to
     // fetch
-    if (this.fetchAtBuffer_) {
+    } else if (this.fetchAtBuffer_) {
       // Find the segment containing the end of the buffer
       const mediaSourceInfo = Playlist.getMediaInfoForTime(
         playlist,
@@ -1209,7 +1205,7 @@ export default class SegmentLoader extends videojs.EventTarget {
         syncPoint.time
       );
 
-      mediaIndex = mediaSourceInfo.mediaIndex;
+      nextMediaIndex = mediaSourceInfo.mediaIndex;
       startOfSegment = mediaSourceInfo.startTime;
     } else {
       // Find the segment containing currentTime
@@ -1220,11 +1216,35 @@ export default class SegmentLoader extends videojs.EventTarget {
         syncPoint.time
       );
 
-      mediaIndex = mediaSourceInfo.mediaIndex;
+      nextMediaIndex = mediaSourceInfo.mediaIndex;
       startOfSegment = mediaSourceInfo.startTime;
     }
 
-    return this.generateSegmentInfo_(playlist, mediaIndex, startOfSegment, false);
+    const segmentInfo = this.generateSegmentInfo_(playlist, nextMediaIndex, startOfSegment, isSyncRequest);
+
+    if (!segmentInfo) {
+      return;
+    }
+
+    // if this is the last segment in the playlist
+    // we are not seeking and end of stream has already been called
+    // do not re-request
+    if (this.mediaSource_ && this.playlist_ && segmentInfo.mediaIndex === this.playlist_.segments.length - 1 &&
+        this.mediaSource_.readyState === 'ended' &&
+        !this.seeking_()) {
+      return;
+    }
+
+    this.logger_(`checkBuffer_ returning ${segmentInfo.uri}`, {
+      segmentInfo,
+      playlist,
+      currentMediaIndex,
+      nextMediaIndex,
+      startOfSegment,
+      isSyncRequest
+    });
+
+    return segmentInfo;
   }
 
   /**
@@ -1323,10 +1343,9 @@ export default class SegmentLoader extends videojs.EventTarget {
    *
    * @param {Object} stats
    *        Object containing stats about the request timing and size
-   * @return {boolean} True if the request was aborted, false otherwise
    * @private
    */
-  abortRequestEarly_(stats) {
+  earlyAbortWhenNeeded_(stats) {
     if (this.vhs_.tech_.paused() ||
         // Don't abort if the current playlist is on the lowestEnabledRendition
         // TODO: Replace using timeout with a boolean indicating whether this playlist is
@@ -1334,14 +1353,14 @@ export default class SegmentLoader extends videojs.EventTarget {
         !this.xhrOptions_.timeout ||
         // Don't abort if we have no bandwidth information to estimate segment sizes
         !(this.playlist_.attributes.BANDWIDTH)) {
-      return false;
+      return;
     }
 
     // Wait at least 1 second since the first byte of data has been received before
     // using the calculated bandwidth from the progress event to allow the bitrate
     // to stabilize
     if (Date.now() - (stats.firstBytesReceivedAt || Date.now()) < 1000) {
-      return false;
+      return;
     }
 
     const currentTime = this.currentTime_();
@@ -1368,7 +1387,7 @@ export default class SegmentLoader extends videojs.EventTarget {
     // Only consider aborting early if the estimated time to finish the download
     // is larger than the estimated time until the player runs out of forward buffer
     if (requestTimeRemaining <= timeUntilRebuffer) {
-      return false;
+      return;
     }
 
     const switchCandidate = minRebufferMaxBandwidthSelector({
@@ -1402,7 +1421,7 @@ export default class SegmentLoader extends videojs.EventTarget {
     if (!switchCandidate.playlist ||
         switchCandidate.playlist.uri === this.playlist_.uri ||
         timeSavedBySwitching < minimumTimeSaving) {
-      return false;
+      return;
     }
 
     // set the bandwidth to that of the desired playlist being sure to scale by
@@ -1410,9 +1429,7 @@ export default class SegmentLoader extends videojs.EventTarget {
     // don't trigger a bandwidthupdate as the bandwidth is artifial
     this.bandwidth =
       switchCandidate.playlist.attributes.BANDWIDTH * Config.BANDWIDTH_VARIANCE + 1;
-    this.abort();
     this.trigger('earlyabort');
-    return true;
   }
 
   handleAbort_() {
@@ -1429,8 +1446,9 @@ export default class SegmentLoader extends videojs.EventTarget {
    * @private
    */
   handleProgress_(event, simpleSegment) {
-    if (this.checkForAbort_(simpleSegment.requestId) ||
-        this.abortRequestEarly_(simpleSegment.stats)) {
+    this.earlyAbortWhenNeeded_(simpleSegment.stats);
+
+    if (this.checkForAbort_(simpleSegment.requestId)) {
       return;
     }
 
@@ -1438,8 +1456,9 @@ export default class SegmentLoader extends videojs.EventTarget {
   }
 
   handleTrackInfo_(simpleSegment, trackInfo) {
-    if (this.checkForAbort_(simpleSegment.requestId) ||
-        this.abortRequestEarly_(simpleSegment.stats)) {
+    this.earlyAbortWhenNeeded_(simpleSegment.stats);
+
+    if (this.checkForAbort_(simpleSegment.requestId)) {
       return;
     }
 
@@ -1452,21 +1471,21 @@ export default class SegmentLoader extends videojs.EventTarget {
     // When we have track info, determine what media types this loader is dealing with.
     // Guard against cases where we're not getting track info at all until we are
     // certain that all streams will provide it.
-    if (!shallowEqual(this.startingMedia_, trackInfo)) {
+    if (!shallowEqual(this.currentMediaInfo_, trackInfo)) {
       this.appendInitSegment_ = {
         audio: true,
         video: true
       };
 
-      this.startingMedia_ = trackInfo;
+      this.startingMediaInfo_ = trackInfo;
+      this.currentMediaInfo_ = trackInfo;
       this.logger_('trackinfo update', trackInfo);
       this.trigger('trackinfo');
     }
 
     // trackinfo may cause an abort if the trackinfo
     // causes a codec change to an unsupported codec.
-    if (this.checkForAbort_(simpleSegment.requestId) ||
-        this.abortRequestEarly_(simpleSegment.stats)) {
+    if (this.checkForAbort_(simpleSegment.requestId)) {
       return;
     }
 
@@ -1481,8 +1500,8 @@ export default class SegmentLoader extends videojs.EventTarget {
   }
 
   handleTimingInfo_(simpleSegment, mediaType, timeType, time) {
-    if (this.checkForAbort_(simpleSegment.requestId) ||
-        this.abortRequestEarly_(simpleSegment.stats)) {
+    this.earlyAbortWhenNeeded_(simpleSegment.stats);
+    if (this.checkForAbort_(simpleSegment.requestId)) {
       return;
     }
 
@@ -1501,8 +1520,9 @@ export default class SegmentLoader extends videojs.EventTarget {
   }
 
   handleCaptions_(simpleSegment, captionData) {
-    if (this.checkForAbort_(simpleSegment.requestId) ||
-      this.abortRequestEarly_(simpleSegment.stats)) {
+    this.earlyAbortWhenNeeded_(simpleSegment.stats);
+
+    if (this.checkForAbort_(simpleSegment.requestId)) {
       return;
     }
 
@@ -1574,8 +1594,9 @@ export default class SegmentLoader extends videojs.EventTarget {
   }
 
   handleId3_(simpleSegment, id3Frames, dispatchType) {
-    if (this.checkForAbort_(simpleSegment.requestId) ||
-        this.abortRequestEarly_(simpleSegment.stats)) {
+    this.earlyAbortWhenNeeded_(simpleSegment.stats);
+
+    if (this.checkForAbort_(simpleSegment.requestId)) {
       return;
     }
 
@@ -1656,7 +1677,7 @@ export default class SegmentLoader extends videojs.EventTarget {
     // created together (before appending). Source buffer creation uses the presence of
     // audio and video data to determine whether to create audio/video source buffers, and
     // uses processed (transmuxed or parsed) media to determine the types required.
-    if (!this.startingMedia_) {
+    if (!this.currentMediaInfo_) {
       return true;
     }
 
@@ -1706,7 +1727,7 @@ export default class SegmentLoader extends videojs.EventTarget {
     }
 
     if (!this.handlePartialData_) {
-      const {hasAudio, hasVideo, isMuxed} = this.startingMedia_;
+      const {hasAudio, hasVideo, isMuxed} = this.currentMediaInfo_;
 
       if (hasVideo && !segmentInfo.videoTimingInfo) {
         return false;
@@ -1734,8 +1755,9 @@ export default class SegmentLoader extends videojs.EventTarget {
   }
 
   handleData_(simpleSegment, result) {
-    if (this.checkForAbort_(simpleSegment.requestId) ||
-        this.abortRequestEarly_(simpleSegment.stats)) {
+    this.earlyAbortWhenNeeded_(simpleSegment.stats);
+
+    if (this.checkForAbort_(simpleSegment.requestId)) {
       return;
     }
 
@@ -1787,7 +1809,7 @@ export default class SegmentLoader extends videojs.EventTarget {
         segmentInfo[timingInfoPropertyForMedia(result.type)].start;
     } else {
       const useVideoTimingInfo =
-        this.loaderType_ === 'main' && this.startingMedia_.hasVideo;
+        this.loaderType_ === 'main' && this.currentMediaInfo_.hasVideo;
       let firstVideoFrameTimeForData;
 
       if (useVideoTimingInfo) {
@@ -2350,7 +2372,7 @@ export default class SegmentLoader extends videojs.EventTarget {
   }
 
   waitForAppendsToComplete_(segmentInfo) {
-    if (!this.startingMedia_) {
+    if (!this.currentMediaInfo_) {
       this.error({
         message: 'No starting media returned, likely due to an unsupported media format.',
         blacklistDuration: Infinity
@@ -2361,7 +2383,7 @@ export default class SegmentLoader extends videojs.EventTarget {
     // Although transmuxing is done, appends may not yet be finished. Throw a marker
     // on each queue this loader is responsible for to ensure that the appends are
     // complete.
-    const {hasAudio, hasVideo, isMuxed} = this.startingMedia_;
+    const {hasAudio, hasVideo, isMuxed} = this.currentMediaInfo_;
     const waitForVideo = this.loaderType_ === 'main' && hasVideo;
     // TODO: does this break partial support for muxed content?
     const waitForAudio = !this.audioDisabled_ && hasAudio && !isMuxed;
@@ -2430,7 +2452,7 @@ export default class SegmentLoader extends videojs.EventTarget {
 
   checkForIllegalMediaSwitch(trackInfo) {
     const illegalMediaSwitchError =
-      illegalMediaSwitch(this.loaderType_, this.startingMedia_, trackInfo);
+      illegalMediaSwitch(this.loaderType_, this.currentMediaInfo_, trackInfo);
 
     if (illegalMediaSwitchError) {
       this.error({
@@ -2486,7 +2508,7 @@ export default class SegmentLoader extends videojs.EventTarget {
   updateTimingInfoEnd_(segmentInfo) {
     segmentInfo.timingInfo = segmentInfo.timingInfo || {};
     const useVideoTimingInfo =
-      this.loaderType_ === 'main' && this.startingMedia_.hasVideo;
+      this.loaderType_ === 'main' && this.currentMediaInfo_.hasVideo;
     const prioritizedTimingInfo = useVideoTimingInfo && segmentInfo.videoTimingInfo ?
       segmentInfo.videoTimingInfo : segmentInfo.audioTimingInfo;
 
@@ -2508,6 +2530,11 @@ export default class SegmentLoader extends videojs.EventTarget {
    * @private
    */
   handleAppendsDone_() {
+    // appendsdone can cause an abort
+    if (this.pendingSegment_) {
+      this.trigger('appendsdone');
+    }
+
     if (!this.pendingSegment_) {
       this.state = 'READY';
       // TODO should this move into this.checkForAbort to speed up requests post abort in
@@ -2517,8 +2544,6 @@ export default class SegmentLoader extends videojs.EventTarget {
       }
       return;
     }
-
-    this.trigger('appendsdone');
 
     const segmentInfo = this.pendingSegment_;
 

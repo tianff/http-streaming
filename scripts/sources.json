@@ -108,7 +108,7 @@
     "features": []
   },
   {
-    "name": "Angel One - fmp4, webm, subs, alternate audio tracks",
+    "name": "Angel One - fmp4, webm, subs (TODO: subs are broken), alternate audio tracks",
     "uri": "https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd",
     "mimetype": "application/dash+xml",
     "features": []
@@ -297,5 +297,17 @@
       "com.widevine.alpha": "https://amssamples.keydelivery.mediaservices.windows.net/Widevine/?KID=1ab45440-532c-4399-94dc-5c5ad9584bac",
       "com.microsoft.playready": "https://amssamples.keydelivery.mediaservices.windows.net/PlayReady/"
     }
+  },
+  {
+    "name": "Big Buck Bunny Audio only, groups have same uri as renditons",
+    "uri": "https://d2zihajmogu5jn.cloudfront.net/audio-only-dupe-groups/prog_index.m3u8",
+    "mimetype": "application/x-mpegurl",
+    "features": []
+  },
+  {
+    "name": "Big Buck Bunny Demuxed av, audio only rendition same as group",
+    "uri": "https://d2zihajmogu5jn.cloudfront.net/demuxed-ts-with-audio-only-rendition/master.m3u8",
+    "mimetype": "application/x-mpegurl",
+    "features": []
   }
 ]

@@ -11,7 +11,6 @@
 import window from 'global/window';
 import * as Ranges from './ranges';
 import logger from './util/logger';
-import videojs from 'video.js';
 
 // Set of events that reset the playback-watcher time check logic and clear the timeout
 const timerCancelEvents = [
@@ -220,14 +219,6 @@ export default class PlaybackWatcher {
     this.tech_.trigger({type: 'usage', name: `vhs-${type}-download-exclusion`});
 
     if (type === 'subtitle') {
-      // TODO: Is there anything else that we can do here?
-      // removing the track and disabling could have accesiblity implications.
-      const track = loader.track();
-      const label = track.label || track.language || 'Unknown';
-
-      videojs.log.warn(`Text track "${label}" is not working correctly. It will be disabled and excluded.`);
-      track.mode = 'disabled';
-      this.tech_.textTracks().removeTrack(track);
       return;
     }
 
@@ -443,10 +434,15 @@ export default class PlaybackWatcher {
       return true;
     }
 
+    const sourceUpdater = this.tech_.vhs.masterPlaylistController_.sourceUpdater_;
     const buffered = this.tech_.buffered();
-    const nextRange = Ranges.findNextRange(buffered, currentTime);
+    const videoUnderflow = this.videoUnderflow_({
+      audioBuffered: sourceUpdater.audioBuffered(),
+      videoBuffered: sourceUpdater.videoBuffered(),
+      currentTime
+    });
 
-    if (this.videoUnderflow_(nextRange, buffered, currentTime)) {
+    if (videoUnderflow) {
       // Even though the video underflowed and was stuck in a gap, the audio overplayed
       // the gap, leading currentTime into a buffered range. Seeking to currentTime
       // allows the video to catch up to the audio position without losing any audio
@@ -459,6 +455,7 @@ export default class PlaybackWatcher {
       this.tech_.trigger({type: 'usage', name: 'hls-video-underflow'});
       return true;
     }
+    const nextRange = Ranges.findNextRange(buffered, currentTime);
 
     // check for gap
     if (nextRange.length > 0) {
@@ -512,18 +509,42 @@ export default class PlaybackWatcher {
     return false;
   }
 
-  videoUnderflow_(nextRange, buffered, currentTime) {
-    if (nextRange.length === 0) {
+  videoUnderflow_({videoBuffered, audioBuffered, currentTime}) {
+    // audio only content will not have video underflow :)
+    if (!videoBuffered) {
+      return;
+    }
+    let gap;
+
+    // find a gap in demuxed content.
+    if (videoBuffered.length && audioBuffered.length) {
+      // in Chrome audio will continue to play for ~3s when we run out of video
+      // so we have to check that the video buffer did have some buffer in the
+      // past.
+      const lastVideoRange = Ranges.findRange(videoBuffered, currentTime - 3);
+      const videoRange = Ranges.findRange(videoBuffered, currentTime);
+      const audioRange = Ranges.findRange(audioBuffered, currentTime);
+
+      if (audioRange.length && !videoRange.length && lastVideoRange.length) {
+        gap = {start: lastVideoRange.end(0), end: audioRange.end(0)};
+      }
+
+    // find a gap in muxed content.
+    } else {
+      const nextRange = Ranges.findNextRange(videoBuffered, currentTime);
+
       // Even if there is no available next range, there is still a possibility we are
       // stuck in a gap due to video underflow.
-      const gap = this.gapFromVideoUnderflow_(buffered, currentTime);
-
-      if (gap) {
-        this.logger_(`Encountered a gap in video from ${gap.start} to ${gap.end}. ` +
-                     `Seeking to current time ${currentTime}`);
-
-        return true;
+      if (!nextRange.length) {
+        gap = this.gapFromVideoUnderflow_(videoBuffered, currentTime);
       }
+    }
+
+    if (gap) {
+      this.logger_(`Encountered a gap in video from ${gap.start} to ${gap.end}. ` +
+        `Seeking to current time ${currentTime}`);
+
+      return true;
     }
 
     return false;

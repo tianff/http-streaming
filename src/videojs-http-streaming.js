@@ -26,15 +26,21 @@ import reloadSourceOnError from './reload-source-on-error';
 import {
   lastBandwidthSelector,
   lowestBitrateCompatibleVariantSelector,
+  movingAverageBandwidthSelector,
   comparePlaylistBandwidth,
   comparePlaylistResolution
 } from './playlist-selectors.js';
+import {isAudioCodec, isVideoCodec, browserSupportsCodec} from '@videojs/vhs-utils/dist/codecs.js';
+
+// IMPORTANT:
+// keep these at the bottom they are replaced at build time
+// because webpack and rollup without plugins do not support json
+// and we do not want to break our users
 import {version as vhsVersion} from '../package.json';
 import {version as muxVersion} from 'mux.js/package.json';
 import {version as mpdVersion} from 'mpd-parser/package.json';
 import {version as m3u8Version} from 'm3u8-parser/package.json';
 import {version as aesVersion} from 'aes-decrypter/package.json';
-import {isAudioCodec, isVideoCodec, browserSupportsCodec} from '@videojs/vhs-utils/dist/codecs.js';
 
 const Vhs = {
   PlaylistLoader,
@@ -43,6 +49,8 @@ const Vhs = {
 
   STANDARD_PLAYLIST_SELECTOR: lastBandwidthSelector,
   INITIAL_PLAYLIST_SELECTOR: lowestBitrateCompatibleVariantSelector,
+  lastBandwidthSelector,
+  movingAverageBandwidthSelector,
   comparePlaylistBandwidth,
   comparePlaylistResolution,
 
@@ -57,6 +65,7 @@ const Vhs = {
   'GOAL_BUFFER_LENGTH_RATE',
   'BUFFER_LOW_WATER_LINE',
   'MAX_BUFFER_LOW_WATER_LINE',
+  'EXPERIMENTAL_MAX_BUFFER_LOW_WATER_LINE',
   'BUFFER_LOW_WATER_LINE_RATE',
   'BANDWIDTH_VARIANCE'
 ].forEach((prop) => {
@@ -136,7 +145,7 @@ const emeKeySystems = (keySystemOptions, videoPlaylist, audioPlaylist) => {
     audio: audioPlaylist && audioPlaylist.attributes && audioPlaylist.attributes.CODECS
   };
 
-  if (!codecs.audio && codecs.video.split(',').length > 1) {
+  if (!codecs.audio && codecs.video && codecs.video.split(',').length > 1) {
     codecs.video.split(',').forEach(function(codec) {
       codec = codec.trim();
 
@@ -243,10 +252,6 @@ const setupEmeOptions = ({
   audioMedia,
   mainPlaylists
 }) => {
-  if (!player.eme) {
-    return;
-  }
-
   const sourceOptions = emeKeySystems(sourceKeySystems, media, audioMedia);
 
   if (!sourceOptions) {
@@ -254,6 +259,13 @@ const setupEmeOptions = ({
   }
 
   player.currentSource().keySystems = sourceOptions;
+
+  // eme handles the rest of the setup, so if it is missing
+  // do nothing.
+  if (sourceOptions && !player.eme) {
+    videojs.log.warn('DRM encrypted source cannot be decrypted without a DRM plugin');
+    return;
+  }
 
   // works around https://bugs.chromium.org/p/chromium/issues/detail?id=895449
   // in non-IE11 browsers. In IE11 this is too early to initialize media keys
@@ -519,7 +531,9 @@ class VhsHandler extends Component {
     });
 
     this.on(this.tech_, 'error', function() {
-      if (this.masterPlaylistController_) {
+      // verify that the error was real and we are loaded
+      // enough to have mpc loaded.
+      if (this.tech_.error() && this.masterPlaylistController_) {
         this.masterPlaylistController_.pauseLoading();
       }
     });
@@ -530,7 +544,7 @@ class VhsHandler extends Component {
   setOptions_() {
     // defaults
     this.options_.withCredentials = this.options_.withCredentials || false;
-    this.options_.handleManifestRedirects = this.options_.handleManifestRedirects || false;
+    this.options_.handleManifestRedirects = this.options_.handleManifestRedirects === false ? false : true;
     this.options_.limitRenditionByPlayerDimensions = this.options_.limitRenditionByPlayerDimensions === false ? false : true;
     this.options_.useDevicePixelRatio = this.options_.useDevicePixelRatio || false;
     this.options_.smoothQualityChange = this.options_.smoothQualityChange || false;
@@ -586,7 +600,10 @@ class VhsHandler extends Component {
       'customTagMappers',
       'handleManifestRedirects',
       'cacheEncryptionKeys',
-      'handlePartialData'
+      'handlePartialData',
+      'playlistSelector',
+      'initialPlaylistSelector',
+      'experimentalBufferBasedABR'
     ].forEach((option) => {
       if (typeof this.source_[option] !== 'undefined') {
         this.options_[option] = this.source_[option];
@@ -612,6 +629,7 @@ class VhsHandler extends Component {
     this.options_.tech = this.tech_;
     this.options_.externVhs = Vhs;
     this.options_.sourceType = simpleTypeFromSourceType(type);
+
     // Whenever we seek internally, we should update the tech
     this.options_.seekTo = (time) => {
       this.tech_.setCurrentTime(time);
@@ -637,11 +655,14 @@ class VhsHandler extends Component {
       player.error(error);
     });
 
+    const defaultSelector = this.options_.experimentalBufferBasedABR ?
+      Vhs.movingAverageBandwidthSelector(0.55) : Vhs.STANDARD_PLAYLIST_SELECTOR;
+
     // `this` in selectPlaylist should be the VhsHandler for backwards
     // compatibility with < v2
-    this.masterPlaylistController_.selectPlaylist =
-      this.selectPlaylist ?
-        this.selectPlaylist.bind(this) : Vhs.STANDARD_PLAYLIST_SELECTOR.bind(this);
+    this.masterPlaylistController_.selectPlaylist = this.selectPlaylist ?
+      this.selectPlaylist.bind(this) :
+      defaultSelector.bind(this);
 
     this.masterPlaylistController_.selectInitialPlaylist =
       Vhs.INITIAL_PLAYLIST_SELECTOR.bind(this);

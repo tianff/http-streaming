@@ -304,6 +304,36 @@ QUnit.test('the VhsHandler instance is referenced by player.vhs', function(asser
   assert.equal(this.env.log.warn.calls, 1, 'warning logged');
 });
 
+QUnit.test('tech error may pause loading', function(assert) {
+  this.player.src({
+    src: 'manifest/playlist.m3u8',
+    type: 'application/vnd.apple.mpegurl'
+  });
+  this.clock.tick(1);
+
+  const vhs = this.player.tech_.vhs;
+  const mpc = vhs.masterPlaylistController_;
+  let pauseCalled = false;
+
+  mpc.pauseLoading = () => {
+    pauseCalled = true;
+  };
+
+  this.player.tech_.error = () => null;
+  this.player.tech_.trigger('error');
+
+  assert.notOk(pauseCalled, 'no video el error attribute, no pause loading');
+
+  this.player.tech_.error = () => 'foo';
+  this.player.tech_.trigger('error');
+
+  assert.ok(pauseCalled, 'video el error and trigger pauses loading');
+
+  assert.equal(this.env.log.error.calls, 1, '1 media error logged');
+  this.env.log.error.reset();
+
+});
+
 QUnit.test('a deprecation notice is shown when using player.dash', function(assert) {
   this.player.src({
     src: 'manifest/playlist.m3u8',
@@ -1652,7 +1682,7 @@ QUnit.test('does not blacklist compatible H.264 codec strings', function(assert)
   const master = this.player.tech_.vhs.playlists.master;
   const loader = this.player.tech_.vhs.masterPlaylistController_.mainSegmentLoader_;
 
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true};
   loader.trigger('trackinfo');
 
   assert.strictEqual(
@@ -1697,7 +1727,7 @@ QUnit.test('does not blacklist compatible AAC codec strings', function(assert) {
   const loader = this.player.tech_.vhs.masterPlaylistController_.mainSegmentLoader_;
   const master = this.player.tech_.vhs.playlists.master;
 
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true};
   loader.trigger('trackinfo');
 
   assert.strictEqual(
@@ -1758,7 +1788,7 @@ QUnit.test('blacklists incompatible playlists by codec, without codec switching'
 
   mpc.sourceUpdater_.canChangeType = () => false;
 
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true};
   loader.trigger('trackinfo');
   const playlists = master.playlists;
 
@@ -1818,7 +1848,7 @@ QUnit.test('does not blacklist incompatible codecs with codec switching', functi
 
   mpc.sourceUpdater_.canChangeType = () => true;
 
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true};
   loader.trigger('trackinfo');
   const playlists = master.playlists;
 
@@ -1882,17 +1912,17 @@ QUnit.test('blacklists fmp4 playlists by browser support', function(assert) {
 
   playlistLoader.media = () => playlists[0];
   loader.mainStartingMedia_ = playlists[0];
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true, isFmp4: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true, isFmp4: true};
   loader.trigger('trackinfo');
 
   playlistLoader.media = () => playlists[1];
   loader.mainStartingMedia_ = playlists[1];
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true, isFmp4: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true, isFmp4: true};
   loader.trigger('trackinfo');
 
   playlistLoader.media = () => playlists[2];
   loader.mainStartingMedia_ = playlists[2];
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true, isFmp4: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true, isFmp4: true};
   loader.trigger('trackinfo');
 
   assert.strictEqual(playlists.length, 3, 'three playlists total');
@@ -1950,17 +1980,17 @@ QUnit.test('blacklists ts playlists by muxer support', function(assert) {
 
   playlistLoader.media = () => playlists[0];
   loader.mainStartingMedia_ = playlists[0];
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true};
   loader.trigger('trackinfo');
 
   playlistLoader.media = () => playlists[1];
   loader.mainStartingMedia_ = playlists[1];
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true};
   loader.trigger('trackinfo');
 
   playlistLoader.media = () => playlists[2];
   loader.mainStartingMedia_ = playlists[2];
-  loader.startingMedia_ = {hasVideo: true, hasAudio: true};
+  loader.currentMediaInfo_ = {hasVideo: true, hasAudio: true};
   loader.trigger('trackinfo');
 
   assert.strictEqual(playlists.length, 3, 'three playlists total');
@@ -5765,9 +5795,9 @@ QUnit.module('setupEmeOptions', {
   }
 });
 
-QUnit.test('no error if no eme', function(assert) {
+QUnit.test('no error if no eme and no key systems', function(assert) {
   const player = {};
-  const sourceKeySystems = {};
+  const sourceKeySystems = null;
   const media = {};
   const audioMedia = {};
   const mainPlaylists = [];
@@ -5775,6 +5805,29 @@ QUnit.test('no error if no eme', function(assert) {
   setupEmeOptions({ player, sourceKeySystems, media, audioMedia, mainPlaylists });
 
   assert.ok(true, 'no exception');
+});
+
+QUnit.test('log error if no eme and we have key systems', function(assert) {
+  const sourceKeySystems = {};
+  const media = {};
+  const audioMedia = {};
+  const mainPlaylists = [];
+  const src = {};
+  const player = {currentSource: () => src};
+
+  let logWarn;
+  const origWarn = videojs.log.warn;
+
+  videojs.log.warn = (line) => {
+    logWarn = line;
+  };
+
+  setupEmeOptions({ player, sourceKeySystems, media, audioMedia, mainPlaylists });
+
+  assert.equal(logWarn, 'DRM encrypted source cannot be decrypted without a DRM plugin', 'logs expected error');
+  assert.ok(src.hasOwnProperty('keySystems'), 'source key systems was set');
+
+  videojs.log.warn = origWarn;
 });
 
 QUnit.test('no initialize calls if no source key systems', function(assert) {

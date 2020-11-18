@@ -80,10 +80,15 @@ QUnit.test('updateMaster: returns falsy when there are no changes', function(ass
 
 QUnit.test('updateMaster: updates playlists', function(assert) {
   const master = {
-    playlists: {
-      length: 1,
-      0: { uri: '0', id: '0' }
+    playlists: [{
+      uri: '0',
+      id: '0'
     },
+    {
+      uri: '1',
+      id: '1',
+      segments: []
+    }],
     mediaGroups: {
       AUDIO: {},
       SUBTITLES: {}
@@ -92,15 +97,18 @@ QUnit.test('updateMaster: updates playlists', function(assert) {
     minimumUpdatePeriod: 0
   };
 
+  // Only the first playlist is changed
   const update = {
-    playlists: {
-      length: 1,
-      0: {
-        id: '0',
-        uri: '0',
-        segments: []
-      }
+    playlists: [{
+      id: '0',
+      uri: '0',
+      segments: []
     },
+    {
+      uri: '1',
+      id: '1',
+      segments: []
+    }],
     mediaGroups: {
       AUDIO: {},
       SUBTITLES: {}
@@ -112,14 +120,16 @@ QUnit.test('updateMaster: updates playlists', function(assert) {
   assert.deepEqual(
     updateMaster(master, update),
     {
-      playlists: {
-        length: 1,
-        0: {
-          id: '0',
-          uri: '0',
-          segments: []
-        }
+      playlists: [{
+        id: '0',
+        uri: '0',
+        segments: []
       },
+      {
+        uri: '1',
+        id: '1',
+        segments: []
+      }],
       mediaGroups: {
         AUDIO: {},
         SUBTITLES: {}
@@ -317,6 +327,62 @@ QUnit.test('updateMaster: updates playlists and mediaGroups', function(assert) {
       }]
     },
     'updates playlists and media groups'
+  );
+});
+
+QUnit.test('updateMaster: updates minimumUpdatePeriod', function(assert) {
+  const master = {
+    playlists: {
+      length: 1,
+      0: {
+        uri: '0',
+        id: '0',
+        segments: []
+      }
+    },
+    mediaGroups: {
+      AUDIO: {},
+      SUBTITLES: {}
+    },
+    duration: 0,
+    minimumUpdatePeriod: 0
+  };
+
+  const update = {
+    playlists: {
+      length: 1,
+      0: {
+        uri: '0',
+        id: '0',
+        segments: []
+      }
+    },
+    mediaGroups: {
+      AUDIO: {},
+      SUBTITLES: {}
+    },
+    duration: 0,
+    minimumUpdatePeriod: 2
+  };
+
+  assert.deepEqual(
+    updateMaster(master, update),
+    {
+      playlists: {
+        length: 1,
+        0: {
+          uri: '0',
+          id: '0',
+          segments: []
+        }
+      },
+      mediaGroups: {
+        AUDIO: {},
+        SUBTITLES: {}
+      },
+      duration: 0,
+      minimumUpdatePeriod: 2
+    }
   );
 });
 
@@ -2293,6 +2359,18 @@ QUnit.test(
   }
 );
 
+QUnit.test('use MPD.Location when refreshing the xml', function(assert) {
+  const loader = new DashPlaylistLoader('location.mpd', this.fakeVhs);
+
+  loader.load();
+  this.standardXHRResponse(this.requests.shift());
+
+  this.clock.tick(4 * 1000);
+
+  assert.equal(this.requests.length, 1, 'refreshed manifest');
+  assert.equal(this.requests[0].uri, 'newlocation/', 'refreshed manifest');
+});
+
 QUnit.test('refreshes the xml if there is a minimumUpdatePeriod', function(assert) {
   const loader = new DashPlaylistLoader('dash-live.mpd', this.fakeVhs);
   let minimumUpdatePeriods = 0;
@@ -2312,7 +2390,34 @@ QUnit.test('refreshes the xml if there is a minimumUpdatePeriod', function(asser
   assert.equal(minimumUpdatePeriods, 1, 'refreshed manifest');
 });
 
-QUnit.test('stop xml refresh if minimumUpdatePeriod changes from `mUP > 0` to `mUP == 0`', function(assert) {
+QUnit.test('stop xml refresh if minimumUpdatePeriod is removed', function(assert) {
+  const loader = new DashPlaylistLoader('dash-live.mpd', this.fakeVhs);
+  let minimumUpdatePeriods = 0;
+
+  loader.on('minimumUpdatePeriod', () => minimumUpdatePeriods++);
+
+  loader.load();
+
+  // Start Request
+  assert.equal(minimumUpdatePeriods, 0, 'no refreshes to start');
+  this.standardXHRResponse(this.requests.shift());
+  assert.equal(minimumUpdatePeriods, 0, 'no refreshes immediately after response');
+
+  // First Refresh Tick: MPD loaded
+  this.clock.tick(4 * 1000);
+  assert.equal(this.requests.length, 1, 'refreshed manifest');
+  assert.equal(this.requests[0].uri, 'dash-live.mpd', 'refreshed manifest');
+  assert.equal(minimumUpdatePeriods, 1, 'total minimumUpdatePeriods');
+
+  this.standardXHRResponse(this.requests[0], loader.masterXml_.replace('minimumUpdatePeriod="PT4S"', ''));
+
+  // Second Refresh Tick: MUP removed
+  this.clock.tick(4 * 1000);
+  assert.equal(this.requests.length, 1, 'no more manifest refreshes');
+  assert.equal(minimumUpdatePeriods, 1, 'no more minimumUpdatePeriods');
+});
+
+QUnit.test('continue xml refresh every targetDuration if minimumUpdatePeriod is 0', function(assert) {
   const loader = new DashPlaylistLoader('dash-live.mpd', this.fakeVhs);
   let minimumUpdatePeriods = 0;
 
@@ -2327,23 +2432,23 @@ QUnit.test('stop xml refresh if minimumUpdatePeriod changes from `mUP > 0` to `m
 
   // First Refresh Tick
   this.clock.tick(4 * 1000);
-  this.standardXHRResponse(this.requests[0], loader.masterXml_);
   assert.equal(this.requests.length, 1, 'refreshed manifest');
   assert.equal(this.requests[0].uri, 'dash-live.mpd', 'refreshed manifest');
   assert.equal(minimumUpdatePeriods, 1, 'total minimumUpdatePeriods');
 
-  // Second Refresh Tick: MinimumUpdatePeriod Removed
-  this.clock.tick(4 * 1000);
-  this.standardXHRResponse(this.requests[1], loader.masterXml_.replace('minimumUpdatePeriod="PT4S"', ''));
-  this.clock.tick(4 * 1000);
-  this.standardXHRResponse(this.requests[2]);
-  assert.equal(this.requests.length, 3, 'final manifest refresh');
-  assert.equal(minimumUpdatePeriods, 3, 'final minimumUpdatePeriods');
+  this.standardXHRResponse(this.requests[0], loader.masterXml_.replace('minimumUpdatePeriod="PT4S"', 'minimumUpdatePeriod="PT0S"'));
 
-  // Third Refresh Tick: No Additional Requests Expected
-  this.clock.tick(4 * 1000);
-  assert.equal(this.requests.length, 3, 'final manifest refresh');
-  assert.equal(minimumUpdatePeriods, 3, 'final minimumUpdatePeriods');
+  // Second Refresh Tick: MinimumUpdatePeriod set to 0
+  // The manifest should refresh after one target duration, in this case 2 seconds. At this point
+  // it should not have occurred.
+  this.clock.tick(1 * 1000);
+  assert.equal(this.requests.length, 1, 'no 3rd manifest refresh yet');
+  assert.equal(minimumUpdatePeriods, 1, 'no 3rd minimumUpdatePeriod yet');
+
+  // Now the refresh should happen
+  this.clock.tick(1 * 1000);
+  assert.equal(this.requests.length, 2, '3rd manifest refresh after targetDuration');
+  assert.equal(minimumUpdatePeriods, 2, '3rd minimumUpdatePeriod after targetDuration');
 });
 
 QUnit.test('media playlists "refresh" by re-parsing master xml', function(assert) {

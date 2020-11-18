@@ -19,7 +19,7 @@ const playFor = function(player, time, cb) {
 
   const checkPlayerTime = function() {
     window.setTimeout(() => {
-      if (player.currentTime() <= targetTime) {
+      if (player.tech_ && player.tech_.el_ && player.currentTime() <= targetTime) {
         return checkPlayerTime();
       }
       cb();
@@ -215,6 +215,44 @@ QUnit[testFn]('Big Buck Bunny', function(assert) {
   player.src({
     src: 'https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd',
     type: 'application/dash+xml'
+  });
+});
+
+QUnit[testFn]('Big Buck Bunny audio only, groups & renditions same uri', function(assert) {
+  const done = assert.async();
+
+  assert.expect(2);
+  const player = this.player;
+
+  playFor(player, 2, function() {
+    assert.ok(true, 'played for at least two seconds');
+    assert.equal(player.error(), null, 'has no player errors');
+
+    done();
+  });
+
+  player.src({
+    src: 'https://d2zihajmogu5jn.cloudfront.net/audio-only-dupe-groups/prog_index.m3u8',
+    type: 'application/x-mpegURL'
+  });
+});
+
+QUnit[testFn]('Big Buck Bunny Demuxed av, audio only rendition same as group', function(assert) {
+  const done = assert.async();
+
+  assert.expect(2);
+  const player = this.player;
+
+  playFor(player, 25, function() {
+    assert.ok(true, 'played for at least 25 seconds');
+    assert.equal(player.error(), null, 'has no player errors');
+
+    done();
+  });
+
+  player.src({
+    src: 'https://d2zihajmogu5jn.cloudfront.net/demuxed-ts-with-audio-only-rendition/master.m3u8',
+    type: 'application/x-mpegURL'
   });
 });
 

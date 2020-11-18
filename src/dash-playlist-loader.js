@@ -61,7 +61,7 @@ export const parseMasterXml = ({ masterXml, srcUrl, clientOffset, sidxMapping })
  *         playlists merged in
  */
 export const updateMaster = (oldMaster, newMaster) => {
-  let noChanges;
+  let noChanges = true;
   let update = mergeOptions(oldMaster, {
     // These are top level properties that can be updated
     duration: newMaster.duration,
@@ -74,8 +74,7 @@ export const updateMaster = (oldMaster, newMaster) => {
 
     if (playlistUpdate) {
       update = playlistUpdate;
-    } else {
-      noChanges = true;
+      noChanges = false;
     }
   }
 
@@ -93,6 +92,10 @@ export const updateMaster = (oldMaster, newMaster) => {
       }
     }
   });
+
+  if (newMaster.minimumUpdatePeriod !== oldMaster.minimumUpdatePeriod) {
+    noChanges = false;
+  }
 
   if (noChanges) {
     return null;
@@ -629,12 +632,12 @@ export default class DashPlaylistLoader extends EventTarget {
     this.mediaRequest_ = null;
 
     if (!this.masterPlaylistLoader_) {
-      this.master = parseMasterXml({
+      this.updateMainManifest_(parseMasterXml({
         masterXml: this.masterXml_,
         srcUrl: this.srcUrl,
         clientOffset: this.clientOffset_,
         sidxMapping: this.sidxMapping_
-      });
+      }));
       // We have the master playlist at this point, so
       // trigger this to allow MasterPlaylistController
       // to make an initial playlist selection
@@ -643,6 +646,38 @@ export default class DashPlaylistLoader extends EventTarget {
       // no media playlist was specifically selected so select
       // the one the child playlist loader was created with
       this.media(this.childPlaylist_);
+    }
+  }
+
+  updateMinimumUpdatePeriodTimeout_() {
+    // Clear existing timeout
+    window.clearTimeout(this.minimumUpdatePeriodTimeout_);
+
+    const createMUPTimeout = (mup) => {
+      this.minimumUpdatePeriodTimeout_ = window.setTimeout(() => {
+        this.trigger('minimumUpdatePeriod');
+      }, mup);
+    };
+
+    const minimumUpdatePeriod = this.master && this.master.minimumUpdatePeriod;
+
+    if (minimumUpdatePeriod > 0) {
+      createMUPTimeout(minimumUpdatePeriod);
+
+    // If the minimumUpdatePeriod has a value of 0, that indicates that the current
+    // MPD has no future validity, so a new one will need to be acquired when new
+    // media segments are to be made available. Thus, we use the target duration
+    // in this case
+    } else if (minimumUpdatePeriod === 0) {
+      // If we haven't yet selected a playlist, wait until then so we know the
+      // target duration
+      if (!this.media()) {
+        this.one('loadedplaylist', () => {
+          createMUPTimeout(this.media().targetDuration * 1000);
+        });
+      } else {
+        createMUPTimeout(this.media().targetDuration * 1000);
+      }
     }
   }
 
@@ -657,16 +692,26 @@ export default class DashPlaylistLoader extends EventTarget {
       this.media(this.master.playlists[0]);
     }
 
-    // TODO: minimumUpdatePeriod can have a value of 0. Currently the manifest will not
-    // be refreshed when this is the case. The inter-op guide says that when the
-    // minimumUpdatePeriod is 0, the manifest should outline all currently available
-    // segments, but future segments may require an update. I think a good solution
-    // would be to update the manifest at the same rate that the media playlists
-    // are "refreshed", i.e. every targetDuration.
-    if (this.master && this.master.minimumUpdatePeriod) {
-      this.minimumUpdatePeriodTimeout_ = window.setTimeout(() => {
-        this.trigger('minimumUpdatePeriod');
-      }, this.master.minimumUpdatePeriod);
+    this.updateMinimumUpdatePeriodTimeout_();
+  }
+
+  /**
+   * Given a new manifest, update our pointer to it and update the srcUrl based on the location elements of the manifest, if they exist.
+   *
+   * @param {Object} updatedManifest the manifest to update to
+   */
+  updateMainManifest_(updatedManifest) {
+    this.master = updatedManifest;
+
+    // if locations isn't set or is an empty array, exit early
+    if (!this.master.locations || !this.master.locations.length) {
+      return;
+    }
+
+    const location = this.master.locations[0];
+
+    if (location !== this.srcUrl) {
+      this.srcUrl = location;
     }
   }
 
@@ -744,13 +789,7 @@ export default class DashPlaylistLoader extends EventTarget {
                 // update loader's sidxMapping with parsed sidx box
                 this.sidxMapping_[sidxKey].sidx = sidx;
 
-                // Clear & reset timeout with new minimumUpdatePeriod
-                window.clearTimeout(this.minimumUpdatePeriodTimeout_);
-                if (this.master.minimumUpdatePeriod) {
-                  this.minimumUpdatePeriodTimeout_ = window.setTimeout(() => {
-                    this.trigger('minimumUpdatePeriod');
-                  }, this.master.minimumUpdatePeriod);
-                }
+                this.updateMinimumUpdatePeriodTimeout_();
 
                 // TODO: do we need to reload the current playlist?
                 this.refreshMedia_(this.media().id);
@@ -760,20 +799,14 @@ export default class DashPlaylistLoader extends EventTarget {
             );
           }
         } else {
-          this.master = updatedMaster;
+          this.updateMainManifest_(updatedMaster);
           if (this.media_) {
             this.media_ = this.master.playlists[this.media_.id];
           }
         }
       }
 
-      // Clear & reset timeout with new minimumUpdatePeriod
-      window.clearTimeout(this.minimumUpdatePeriodTimeout_);
-      if (this.master.minimumUpdatePeriod) {
-        this.minimumUpdatePeriodTimeout_ = window.setTimeout(() => {
-          this.trigger('minimumUpdatePeriod');
-        }, this.master.minimumUpdatePeriod);
-      }
+      this.updateMinimumUpdatePeriodTimeout_();
     });
   }
 

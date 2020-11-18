@@ -49,7 +49,9 @@ const shouldSwitchToMedia = function({
   nextPlaylist,
   forwardBuffer,
   bufferLowWaterLine,
+  bufferHighWaterLine,
   duration,
+  experimentalBufferBasedABR,
   log
 }) {
   // we have no other playlist to switch to
@@ -58,30 +60,60 @@ const shouldSwitchToMedia = function({
     return false;
   }
 
+  const sharedLogLine = `allowing switch ${currentPlaylist && currentPlaylist.id || 'null'} -> ${nextPlaylist.id}`;
+
   // If the playlist is live, then we want to not take low water line into account.
   // This is because in LIVE, the player plays 3 segments from the end of the
   // playlist, and if `BUFFER_LOW_WATER_LINE` is greater than the duration availble
   // in those segments, a viewer will never experience a rendition upswitch.
-  if (!currentPlaylist.endList) {
+  if (!currentPlaylist || !currentPlaylist.endList) {
+    log(`${sharedLogLine} as current playlist ` + (!currentPlaylist ? 'is not set' : 'is live'));
     return true;
   }
+
+  // no need to switch playlist is the same
+  if (nextPlaylist.id === currentPlaylist.id) {
+    return false;
+  }
+
+  const maxBufferLowWaterLine = experimentalBufferBasedABR ?
+    Config.EXPERIMENTAL_MAX_BUFFER_LOW_WATER_LINE : Config.MAX_BUFFER_LOW_WATER_LINE;
 
   // For the same reason as LIVE, we ignore the low water line when the VOD
   // duration is below the max potential low water line
-  if (duration < Config.MAX_BUFFER_LOW_WATER_LINE) {
+  if (duration < maxBufferLowWaterLine) {
+    log(`${sharedLogLine} as duration < max low water line (${duration} < ${maxBufferLowWaterLine})`);
     return true;
   }
 
-  // we want to switch down to lower resolutions quickly to continue playback, but
-  if (nextPlaylist.attributes.BANDWIDTH < currentPlaylist.attributes.BANDWIDTH) {
+  const nextBandwidth = nextPlaylist.attributes.BANDWIDTH;
+  const currBandwidth = currentPlaylist.attributes.BANDWIDTH;
+
+  // when switching down, if our buffer is lower than the high water line,
+  // we can switch down
+  if (nextBandwidth < currBandwidth && (!experimentalBufferBasedABR || forwardBuffer < bufferHighWaterLine)) {
+    let logLine = `${sharedLogLine} as next bandwidth < current bandwidth (${nextBandwidth} < ${currBandwidth})`;
+
+    if (experimentalBufferBasedABR) {
+      logLine += ` and forwardBuffer < bufferHighWaterLine (${forwardBuffer} < ${bufferHighWaterLine})`;
+    }
+    log(logLine);
     return true;
   }
 
-  // ensure we have some buffer before we switch up to prevent us running out of
-  // buffer while loading a higher rendition.
-  if (forwardBuffer >= bufferLowWaterLine) {
+  // and if our buffer is higher than the low water line,
+  // we can switch up
+  if ((!experimentalBufferBasedABR || nextBandwidth > currBandwidth) && forwardBuffer >= bufferLowWaterLine) {
+    let logLine = `${sharedLogLine} as forwardBuffer >= bufferLowWaterLine (${forwardBuffer} >= ${bufferLowWaterLine})`;
+
+    if (experimentalBufferBasedABR) {
+      logLine += ` and next bandwidth > current bandwidth (${nextBandwidth} > ${currBandwidth})`;
+    }
+    log(logLine);
     return true;
   }
+
+  log(`not ${sharedLogLine} as no switching criteria met`);
 
   return false;
 };
@@ -111,7 +143,8 @@ export class MasterPlaylistController extends videojs.EventTarget {
       enableLowInitialPlaylist,
       sourceType,
       cacheEncryptionKeys,
-      handlePartialData
+      handlePartialData,
+      experimentalBufferBasedABR
     } = options;
 
     if (!src) {
@@ -120,6 +153,7 @@ export class MasterPlaylistController extends videojs.EventTarget {
 
     Vhs = externVhs;
 
+    this.experimentalBufferBasedABR = Boolean(experimentalBufferBasedABR);
     this.withCredentials = withCredentials;
     this.tech_ = tech;
     this.vhs_ = tech.vhs;
@@ -224,6 +258,12 @@ export class MasterPlaylistController extends videojs.EventTarget {
 
     this.setupSegmentLoaderListeners_();
 
+    if (this.experimentalBufferBasedABR) {
+      this.startABRTimer_();
+      this.tech_.on('pause', () => this.stopABRTimer_());
+      this.tech_.on('play', () => this.startABRTimer_());
+    }
+
     // Create SegmentLoader stat-getters
     // mediaRequests_
     // mediaRequestsAborted_
@@ -239,6 +279,45 @@ export class MasterPlaylistController extends videojs.EventTarget {
 
     this.triggeredFmp4Usage = false;
     this.masterPlaylistLoader_.load();
+  }
+
+  /**
+   * Run selectPlaylist and switch to the new playlist if we should
+   *
+   * @private
+   *
+   */
+  checkABR_() {
+    const nextPlaylist = this.selectPlaylist();
+
+    if (this.shouldSwitchToMedia_(nextPlaylist)) {
+      this.masterPlaylistLoader_.media(nextPlaylist);
+    }
+  }
+
+  /**
+   * Start a timer that periodically calls checkABR_
+   *
+   * @private
+   */
+  startABRTimer_() {
+    this.stopABRTimer_();
+    this.abrTimer_ = window.setInterval(() => this.checkABR_(), 250);
+  }
+
+  /**
+   * Stop the timer that periodically calls checkABR_
+   *
+   * @private
+   */
+  stopABRTimer_() {
+    // if we're scrubbing, we don't need to pause.
+    // This getter will be added to Video.js in version 7.11.
+    if (this.tech_.scrubbing && this.tech_.scrubbing()) {
+      return;
+    }
+    window.clearInterval(this.abrTimer_);
+    this.abrTimer_ = null;
   }
 
   /**
@@ -318,7 +397,12 @@ export class MasterPlaylistController extends videojs.EventTarget {
           selectedMedia = this.selectPlaylist();
         }
 
+        if (!selectedMedia || !this.shouldSwitchToMedia_(selectedMedia)) {
+          return;
+        }
+
         this.initialMedia_ = selectedMedia;
+
         this.masterPlaylistLoader_.media(this.initialMedia_);
 
         // Under the standard case where a source URL is provided, loadedplaylist will
@@ -478,6 +562,27 @@ export class MasterPlaylistController extends videojs.EventTarget {
       this.tech_.trigger({type: 'usage', name: 'hls-playlist-cue-tags'});
     }
   }
+
+  shouldSwitchToMedia_(nextPlaylist) {
+    const currentPlaylist = this.masterPlaylistLoader_.media();
+    const buffered = this.tech_.buffered();
+    const forwardBuffer = buffered.length ?
+      buffered.end(buffered.length - 1) - this.tech_.currentTime() : 0;
+
+    const bufferLowWaterLine = this.bufferLowWaterLine();
+    const bufferHighWaterLine = this.bufferHighWaterLine();
+
+    return shouldSwitchToMedia({
+      currentPlaylist,
+      nextPlaylist,
+      forwardBuffer,
+      bufferLowWaterLine,
+      bufferHighWaterLine,
+      duration: this.duration(),
+      experimentalBufferBasedABR: this.experimentalBufferBasedABR,
+      log: this.logger_
+    });
+  }
   /**
    * Register event handlers on the segment loaders. A helper function
    * for construction time.
@@ -485,31 +590,21 @@ export class MasterPlaylistController extends videojs.EventTarget {
    * @private
    */
   setupSegmentLoaderListeners_() {
-    this.mainSegmentLoader_.on('bandwidthupdate', () => {
-      const nextPlaylist = this.selectPlaylist();
-      const currentPlaylist = this.masterPlaylistLoader_.media();
-      const buffered = this.tech_.buffered();
-      const forwardBuffer = buffered.length ?
-        buffered.end(buffered.length - 1) - this.tech_.currentTime() : 0;
+    if (!this.experimentalBufferBasedABR) {
+      this.mainSegmentLoader_.on('bandwidthupdate', () => {
+        const nextPlaylist = this.selectPlaylist();
 
-      const bufferLowWaterLine = this.bufferLowWaterLine();
+        if (this.shouldSwitchToMedia_(nextPlaylist)) {
+          this.masterPlaylistLoader_.media(nextPlaylist);
+        }
 
-      if (shouldSwitchToMedia({
-        currentPlaylist,
-        nextPlaylist,
-        forwardBuffer,
-        bufferLowWaterLine,
-        duration: this.duration(),
-        log: this.logger_
-      })) {
-        this.masterPlaylistLoader_.media(nextPlaylist);
-      }
+        this.tech_.trigger('bandwidthupdate');
+      });
 
-      this.tech_.trigger('bandwidthupdate');
-    });
-    this.mainSegmentLoader_.on('progress', () => {
-      this.trigger('progress');
-    });
+      this.mainSegmentLoader_.on('progress', () => {
+        this.trigger('progress');
+      });
+    }
 
     this.mainSegmentLoader_.on('error', () => {
       this.blacklistCurrentPlaylist(this.mainSegmentLoader_.error());
@@ -542,7 +637,14 @@ export class MasterPlaylistController extends videojs.EventTarget {
       this.onEndOfStream();
     });
 
-    this.mainSegmentLoader_.on('earlyabort', () => {
+    this.mainSegmentLoader_.on('earlyabort', (event) => {
+      // never try to early abort with the new ABR algorithm
+      if (this.experimentalBufferBasedABR) {
+        return;
+      }
+
+      this.delegateLoaders_('all', ['abort']);
+
       this.blacklistCurrentPlaylist({
         message: 'Aborted early because there isn\'t enough bandwidth to complete the ' +
           'request without rebuffering.'
@@ -808,8 +910,8 @@ export class MasterPlaylistController extends videojs.EventTarget {
 
     if (this.mediaTypes_.AUDIO.activePlaylistLoader) {
       // if the audio playlist loader exists, then alternate audio is active
-      if (!this.mainSegmentLoader_.startingMedia_ ||
-          this.mainSegmentLoader_.startingMedia_.hasVideo) {
+      if (!this.mainSegmentLoader_.currentMediaInfo_ ||
+          this.mainSegmentLoader_.currentMediaInfo_.hasVideo) {
         // if we do not know if the main segment loader contains video yet or if we
         // definitively know the main segment loader contains video, then we need to wait
         // for both main and audio segment loaders to call endOfStream
@@ -824,6 +926,7 @@ export class MasterPlaylistController extends videojs.EventTarget {
       return;
     }
 
+    this.stopABRTimer_();
     this.sourceUpdater_.endOfStream();
   }
 
@@ -991,6 +1094,7 @@ export class MasterPlaylistController extends videojs.EventTarget {
    */
   pauseLoading() {
     this.delegateLoaders_('all', ['abort', 'pause']);
+    this.stopABRTimer_();
   }
 
   /**
@@ -1311,6 +1415,9 @@ export class MasterPlaylistController extends videojs.EventTarget {
     this.subtitleSegmentLoader_.dispose();
     this.sourceUpdater_.dispose();
     this.timelineChangeController_.dispose();
+
+    this.stopABRTimer_();
+
     if (this.updateDuration_) {
       this.mediaSource.removeEventListener('sourceopen', this.updateDuration_);
     }
@@ -1346,7 +1453,7 @@ export class MasterPlaylistController extends videojs.EventTarget {
     const usingAudioLoader = !!this.mediaTypes_.AUDIO.activePlaylistLoader;
 
     // one or both loaders has not loaded sufficently to get codecs
-    if (!this.mainSegmentLoader_.startingMedia_ || (usingAudioLoader && !this.audioSegmentLoader_.startingMedia_)) {
+    if (!this.mainSegmentLoader_.currentMediaInfo_ || (usingAudioLoader && !this.audioSegmentLoader_.currentMediaInfo_)) {
       return false;
     }
 
@@ -1355,8 +1462,8 @@ export class MasterPlaylistController extends videojs.EventTarget {
 
   getCodecsOrExclude_() {
     const media = {
-      main: this.mainSegmentLoader_.startingMedia_ || {},
-      audio: this.audioSegmentLoader_.startingMedia_ || {}
+      main: this.mainSegmentLoader_.currentMediaInfo_ || {},
+      audio: this.audioSegmentLoader_.currentMediaInfo_ || {}
     };
 
     // set "main" media equal to video
@@ -1633,8 +1740,13 @@ export class MasterPlaylistController extends videojs.EventTarget {
     const initial = Config.BUFFER_LOW_WATER_LINE;
     const rate = Config.BUFFER_LOW_WATER_LINE_RATE;
     const max = Math.max(initial, Config.MAX_BUFFER_LOW_WATER_LINE);
+    const newMax = Math.max(initial, Config.EXPERIMENTAL_MAX_BUFFER_LOW_WATER_LINE);
 
-    return Math.min(initial + currentTime * rate, max);
+    return Math.min(initial + currentTime * rate, this.experimentalBufferBasedABR ? newMax : max);
+  }
+
+  bufferHighWaterLine() {
+    return Config.BUFFER_HIGH_WATER_LINE;
   }
 
 }
